@@ -1,0 +1,12 @@
+services:
+  moodle-sync:
+    build: .
+    container_name: moodle-sync
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SYNC_INTERVAL_MINUTES: "2"        # cada cuánto sincroniza
+    ports:
+      - "127.0.0.1:8765:8765"           # solo para la primera autorización de Google
+    volumes:
+      - ./data:/data                    # estado, autorización y log
