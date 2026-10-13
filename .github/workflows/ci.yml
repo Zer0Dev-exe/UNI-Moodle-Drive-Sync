@@ -41,7 +41,9 @@ jobs:
       - name: Construir imagen (.)
         run: docker build -f Dockerfile .
       - name: Validar docker-compose.yml
-        run: docker compose -f docker-compose.yml config -q
+        run: |
+          [ -f .env ] || cp .env.example .env
+          docker compose -f docker-compose.yml config -q
 
   # Si todos los jobs anteriores pasan y el PR es de Dependabot, se hace merge solo.
   # Las subidas de versión major se quedan abiertas para revisarlas a mano.
