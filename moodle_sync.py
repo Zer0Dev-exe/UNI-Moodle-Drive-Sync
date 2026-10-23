@@ -10,6 +10,9 @@ Sincroniza todo el contenido de un Moodle con Google Drive.
 Pensado para ejecutarse con Docker (ver README). Opciones:
     --loop MIN    repetir cada MIN minutos (o variable SYNC_INTERVAL_MINUTES)
     --dry-run     mostrar qué haría sin tocar Drive
+
+Si se define LOCAL_DIR, además se mantiene una copia local con la misma estructura
+y las mismas reglas (lo borrado en Moodle se conserva).
 """
 import argparse
 import datetime as dt
@@ -20,6 +23,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -40,6 +44,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 MOODLE_URL = os.environ.get("MOODLE_URL", "").rstrip("/")
 DRIVE_ROOT = os.environ.get("DRIVE_ROOT_FOLDER", "Moodle")
+LOCAL_DIR = os.environ.get("LOCAL_DIR", "")
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
@@ -290,6 +295,7 @@ class Syncer:
         self.seen: set[str] = set()
         self.ok_courses: set[int] = set()
         self.changes: list[tuple] = []
+        self.local_owners = {st["local"]: k for k, st in self.state["files"].items() if st.get("local")}
         self.stats = {"nuevos": 0, "actualizados": 0, "movidos": 0, "sin_cambios": 0,
                       "borrados_en_moodle": 0, "errores": 0}
 
@@ -333,6 +339,7 @@ class Syncer:
                 else:
                     self.stats["sin_cambios"] += 1
                 self._undelete(st, it.key)
+                self.ensure_local(it, st)
                 return
 
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -351,17 +358,70 @@ class Syncer:
                     st.update(version=it.version, md5=md5, parent=parent, name=it.name,
                               path="/".join(it.path), updated=now_iso())
                     self._undelete(st, it.key)
+                    self.write_local(it, st, local)
                 else:
                     fid = self.d.upload(local, it.name, parent, f"Moodle: {it.key}")
                     files[it.key] = {"drive_id": fid, "version": it.version, "md5": md5, "parent": parent,
                                      "name": it.name, "path": "/".join(it.path), "course": it.course,
                                      "created": now_iso(), "updated": now_iso()}
+                    if st and st.get("local"):
+                        files[it.key]["local"] = st["local"]
+                    self.write_local(it, files[it.key], local)
                     self.stats["nuevos"] += 1
                     self.change("RE-SUBIDO" if st else "NUEVO", it.path, it.name)
             self.save_state()
         except Exception as e:
             self.stats["errores"] += 1
             log.error("Error con %s (%s): %s", it.name, it.key, e)
+
+    # ---------- copia local (opcional)
+    def _local_target(self, it: Item, st) -> str:
+        """Ruta relativa en LOCAL_DIR; si otro fichero ya ocupa ese nombre, se desambigua."""
+        rel = os.path.join(*it.path, it.name) if it.path else it.name
+        owner = self.local_owners.get(rel)
+        if owner and owner != it.key:
+            stem, ext = os.path.splitext(it.name)
+            tag = hashlib.md5(it.key.encode()).hexdigest()[:6]
+            rel = os.path.join(*it.path, f"{stem} ({tag}){ext}") if it.path else f"{stem} ({tag}){ext}"
+        return rel
+
+    def _claim_local(self, it: Item, st, rel: str):
+        old = st.get("local")
+        if old and old != rel:
+            self.local_owners.pop(old, None)
+            old_abs = os.path.join(LOCAL_DIR, old)
+            if os.path.exists(old_abs) and not os.path.exists(os.path.join(LOCAL_DIR, rel)):
+                os.makedirs(os.path.dirname(os.path.join(LOCAL_DIR, rel)), exist_ok=True)
+                os.replace(old_abs, os.path.join(LOCAL_DIR, rel))
+        st["local"] = rel
+        self.local_owners[rel] = it.key
+
+    def write_local(self, it: Item, st, src: str):
+        if not LOCAL_DIR:
+            return
+        rel = self._local_target(it, st)
+        self._claim_local(it, st, rel)
+        dest = os.path.join(LOCAL_DIR, rel)
+        if os.path.exists(dest) and md5_file(dest) == md5_file(src):
+            return
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = dest + ".part"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+
+    def ensure_local(self, it: Item, st):
+        """Sin cambios en Drive: mueve la copia local si hace falta o la descarga si falta."""
+        if not LOCAL_DIR:
+            return
+        rel = self._local_target(it, st)
+        self._claim_local(it, st, rel)
+        if os.path.exists(os.path.join(LOCAL_DIR, rel)):
+            return
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local = os.path.join(tmpdir, "f")
+            it.fetch(local)
+            self.write_local(it, st, local)
+        self.save_state()
 
     def change(self, kind, path, name):
         """Registra un cambio: asignatura, dónde está y qué documento."""
