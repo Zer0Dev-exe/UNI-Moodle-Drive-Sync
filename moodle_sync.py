@@ -26,6 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -655,6 +656,65 @@ def setup_logging(verbose: bool):
     logging.getLogger("googleapiclient.http").setLevel(logging.ERROR)  # reintentos automáticos ante 500
 
 
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+
+
+class Control:
+    """Estado compartido con el dashboard: intervalo editable, sincronizar ya y lista de ficheros."""
+
+    def __init__(self, default_interval: int):
+        self.interval = self._saved() or default_interval
+        self.running = False
+        self.last_end = time.time()
+        self._now = False
+        self._wake = threading.Event()
+
+    @staticmethod
+    def _saved() -> int:
+        try:
+            with open(SETTINGS_FILE, encoding="utf-8") as f:
+                return int(json.load(f).get("interval") or 0)
+        except (OSError, ValueError):
+            return 0
+
+    def set_interval(self, minutes) -> int:
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 1440:
+            raise ValueError("El intervalo debe ser un entero entre 1 y 1440 minutos")
+        self.interval = minutes
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"interval": minutes}, f)
+        log.info("Intervalo de sincronización cambiado a %d min", minutes)
+        self._wake.set()
+        return minutes
+
+    def sync_now(self):
+        if not self.running:
+            self._now = True
+            self._wake.set()
+
+    def status(self) -> dict:
+        return {"interval": self.interval, "running": self.running,
+                "next_in": self.last_end + self.interval * 60 - time.time()}
+
+    def files(self) -> list:
+        try:
+            with open(STATE_FILE, encoding="utf-8") as f:
+                files = json.load(f).get("files", {})
+        except (OSError, ValueError):
+            return []
+        return [{"name": st.get("name", ""), "path": st.get("path", ""), "drive_id": st.get("drive_id", ""),
+                 "updated": st.get("updated", ""), "deleted": bool(st.get("deleted_in_moodle"))}
+                for st in files.values()]
+
+    def wait(self):
+        """Espera hasta la próxima sincronización; se interrumpe al cambiar el intervalo o pulsar «ya»."""
+        self.last_end = time.time()
+        self._now = False
+        while not self._now and time.time() < self.last_end + self.interval * 60:
+            self._wake.wait(timeout=max(0.0, self.last_end + self.interval * 60 - time.time()))
+            self._wake.clear()
+
+
 def sync_once(dry_run: bool):
     user, password = os.environ.get("MOODLE_USER"), os.environ.get("MOODLE_PASSWORD")
     if not MOODLE_URL or not user or not password:
@@ -672,17 +732,24 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     setup_logging(args.verbose)
+    ctl = Control(args.loop)
+    if os.environ.get("WEB_PORT"):
+        import web
+        web.start(int(os.environ["WEB_PORT"]), ctl)
     while True:
+        ctl.running = True
         try:
             sync_once(args.dry_run)
         except MoodleError as e:
             log.error("%s", e)
         except Exception:
             log.exception("Fallo inesperado")
+        finally:
+            ctl.running = False
         if not args.loop:
             break
-        log.debug("Próxima sincronización en %d min", args.loop)
-        time.sleep(args.loop * 60)
+        log.debug("Próxima sincronización en %d min", ctl.interval)
+        ctl.wait()
 
 
 if __name__ == "__main__":
