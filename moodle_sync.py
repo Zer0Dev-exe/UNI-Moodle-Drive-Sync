@@ -715,10 +715,30 @@ class Control:
             self._wake.clear()
 
 
+def missing_config(dry_run: bool) -> list[str]:
+    """Variables obligatorias que faltan (las de Google solo hacen falta si se sube a Drive)."""
+    required = ["MOODLE_URL", "MOODLE_USER", "MOODLE_PASSWORD"]
+    if not dry_run:
+        required += ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]
+    return [name for name in required if not os.environ.get(name, "").strip()]
+
+
+def env_int(name: str, default: int = 0) -> int:
+    """Lee un entero del entorno; si no lo es, termina con un mensaje claro en vez de un traceback."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name} debe ser un número entero (valor actual: {raw!r})")
+
+
 def sync_once(dry_run: bool):
-    user, password = os.environ.get("MOODLE_USER"), os.environ.get("MOODLE_PASSWORD")
-    if not MOODLE_URL or not user or not password:
-        raise SystemExit("Define MOODLE_URL, MOODLE_USER y MOODLE_PASSWORD en .env")
+    missing = missing_config(dry_run)
+    if missing:
+        raise SystemExit("Faltan variables en .env: " + ", ".join(missing))
+    user, password = os.environ["MOODLE_USER"], os.environ["MOODLE_PASSWORD"]
     moodle = Moodle(MOODLE_URL, user, password)
     drive = None if dry_run else Drive()
     Syncer(moodle, drive, dry_run).run()
@@ -726,16 +746,17 @@ def sync_once(dry_run: bool):
 
 def main():
     ap = argparse.ArgumentParser(description="Sincroniza Moodle con Google Drive")
-    ap.add_argument("--loop", type=int, metavar="MIN", default=int(os.environ.get("SYNC_INTERVAL_MINUTES") or 0),
+    ap.add_argument("--loop", type=int, metavar="MIN", default=env_int("SYNC_INTERVAL_MINUTES"),
                     help="repetir cada MIN minutos (por defecto: SYNC_INTERVAL_MINUTES o una sola vez)")
     ap.add_argument("--dry-run", action="store_true", help="solo mostrar qué haría, sin tocar Drive")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     setup_logging(args.verbose)
     ctl = Control(args.loop)
-    if os.environ.get("WEB_PORT"):
+    web_port = env_int("WEB_PORT")
+    if web_port:
         import web
-        web.start(int(os.environ["WEB_PORT"]), ctl)
+        web.start(web_port, ctl)
     while True:
         ctl.running = True
         try:
