@@ -59,5 +59,38 @@ class Md5FileTests(unittest.TestCase):
         self.assertEqual(moodle_sync.md5_file(f.name), hashlib.md5(data).hexdigest())
 
 
+class ConfigTests(unittest.TestCase):
+    ENV = ["MOODLE_URL", "MOODLE_USER", "MOODLE_PASSWORD", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "TEST_INT"]
+
+    def setUp(self):
+        saved = {k: os.environ.pop(k, None) for k in self.ENV}
+        self.addCleanup(lambda: [os.environ.__setitem__(k, v) for k, v in saved.items() if v is not None])
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k, v in saved.items() if v is None])
+
+    def test_missing_config_lists_every_variable(self):
+        self.assertEqual(moodle_sync.missing_config(False), self.ENV[:5])
+
+    def test_dry_run_does_not_need_google(self):
+        os.environ.update(MOODLE_URL="https://m", MOODLE_USER="u", MOODLE_PASSWORD="p")
+        self.assertEqual(moodle_sync.missing_config(True), [])
+        self.assertEqual(moodle_sync.missing_config(False), ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"])
+
+    def test_blank_value_counts_as_missing(self):
+        os.environ.update(MOODLE_URL="https://m", MOODLE_USER="  ", MOODLE_PASSWORD="p")
+        self.assertEqual(moodle_sync.missing_config(True), ["MOODLE_USER"])
+
+    def test_env_int(self):
+        self.assertEqual(moodle_sync.env_int("TEST_INT"), 0)
+        self.assertEqual(moodle_sync.env_int("TEST_INT", 5), 5)
+        os.environ["TEST_INT"] = " 7 "
+        self.assertEqual(moodle_sync.env_int("TEST_INT"), 7)
+
+    def test_env_int_rejects_non_numbers(self):
+        os.environ["TEST_INT"] = "dos"
+        with self.assertRaises(SystemExit) as cm:
+            moodle_sync.env_int("TEST_INT")
+        self.assertIn("TEST_INT", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
