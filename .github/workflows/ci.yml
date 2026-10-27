@@ -32,6 +32,8 @@ jobs:
           pip install -r requirements.txt
       - name: Comprobar que todo compila
         run: python -m compileall -q -x '(^|/)(\.venv|venv|build|dist)/' .
+      - name: Ejecutar tests unitarios
+        run: python -m unittest discover -s tests -v
 
   docker:
     name: Docker
